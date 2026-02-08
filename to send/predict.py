@@ -266,165 +266,378 @@
 # cap.release()
 # cv2.destroyAllWindows()
 
+# import cv2
+# import numpy as np
+# import mediapipe as mp
+# import joblib
+
+# import os
+# import requests  # To talk to your Backend Server
+
+# from openai import OpenAI
+# client = OpenAI()
+
+# # --- CONFIG ---
+# MODEL_PATH = 'asl_model.pkl'
+# THRESHOLD = 8   
+# CONF_MIN = 0.65 
+# BACKEND_URL = "http://localhost:5000/speak" # Adjust port if your Node server uses a different one
+
+
+# def send_to_frontend(text):
+#     """Sends the finalized text to the backend to trigger TTS on the web app."""
+#     if not text: return
+#     try:
+#         # We send a POST request to your Node.js/Express backend
+#         response = requests.post(BACKEND_URL, json={"message": text}, timeout=1)
+#         if response.status_code == 200:
+#             print(f"Successfully broadcasted: {text}")
+#     except Exception as e:
+#         print(f"Backend Communication Error: {e}")
+
+# def fix_grammar_with_llm(fragments):
+#     if not fragments:
+#         return ""
+
+#     asl_text = " ".join(fragments)
+
+#     try:
+#         response = client.chat.completions.create(
+#             model="gpt-4o-mini",
+#             temperature=0.2,
+#             messages=[
+#                 {
+#                     "role": "system",
+#                     "content": (
+#                         "You convert American Sign Language gloss into natural, "
+#                         "grammatically correct English sentences. "
+#                         "Return ONLY the corrected sentence. "
+#                         "Do not explain anything."
+#                     )
+#                 },
+#                 {
+#                     "role": "user",
+#                     "content": f"ASL gloss: {asl_text}"
+#                 }
+#             ],
+#         )
+
+#         corrected = response.choices[0].message.content.strip()
+#         return corrected
+
+#     except Exception as e:
+#         print("OpenAI Error:", e)
+#         return asl_text  # fallback
+
+
+# # --- MODEL LOADING ---
+# try:
+#     model = joblib.load(MODEL_PATH)
+#     print("ASL Model: LOADED")
+# except Exception as e:
+#     print(f"Error loading model: {e}")
+#     exit()
+
+# # Mediapipe Hands
+# mp_hands = mp.solutions.hands
+# hands = mp_hands.Hands(min_detection_confidence=0.7, max_num_hands=2)
+# mp_drawing = mp.solutions.drawing_utils
+
+# cap = cv2.VideoCapture(0)
+# sentence_fragments = []
+# final_sentence = "" 
+# current_word = ""
+# counter = 0
+
+# print("\n--- ENGINE RUNNING ---")
+
+# while cap.isOpened():
+#     ret, frame = cap.read()
+#     if not ret: break
+#     frame = cv2.flip(frame, 1)
+#     h, w, _ = frame.shape
+    
+#     results = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+#     row_data = np.zeros(126) 
+#     prediction_made = False
+
+#     if results.multi_hand_landmarks:
+#         for i, hand_lms in enumerate(results.multi_hand_landmarks):
+#             if i < 2:
+#                 wrist = hand_lms.landmark[0]
+#                 coords = []
+#                 for lm in hand_lms.landmark:
+#                     coords.extend([lm.x - wrist.x, lm.y - wrist.y, lm.z - wrist.z])
+#                 row_data[i*63 : (i+1)*63] = coords
+#                 mp_drawing.draw_landmarks(frame, hand_lms, mp_hands.HAND_CONNECTIONS)
+        
+#         probs = model.predict_proba([row_data])
+#         conf = np.max(probs)
+#         pred = model.predict([row_data])[0]
+
+#         if conf > CONF_MIN:
+#             prediction_made = True
+#             if pred == current_word:
+#                 counter += 1
+#             else:
+#                 current_word = pred
+#                 counter = 0
+            
+#             if counter == THRESHOLD:
+#                 if pred == "space":
+#                     if sentence_fragments:
+#                         final_sentence = fix_grammar_with_llm(sentence_fragments)
+#                         # TRIGGER FRONTEND TTS & UI
+#                         send_to_frontend(final_sentence)
+#                         sentence_fragments = [] 
+#                 elif pred != "none":
+#                     if not sentence_fragments or sentence_fragments[-1] != pred:
+#                         sentence_fragments.append(pred)
+#                         final_sentence = "" 
+#                 counter = 0
+#     else:
+#         current_word = ""
+#         counter = 0
+
+#     # UI Overlays
+#     cv2.rectangle(frame, (0, 0), (w, 85), (20, 20, 20), -1)
+#     display_text = final_sentence if final_sentence else " ".join(sentence_fragments).upper()
+#     color = (0, 255, 0) if final_sentence else (0, 255, 255)
+#     cv2.putText(frame, display_text, (20, 55), cv2.FONT_HERSHEY_DUPLEX, 1.0, color, 2)
+
+#     cv2.imshow('Universal Link - Backend Engine', frame)
+    
+#     key = cv2.waitKey(1)
+#     if key == ord('q'): break
+#     if key == ord('c'): 
+#         sentence_fragments = []
+#         final_sentence = ""
+
+# cap.release()
+# cv2.destroyAllWindows()
+# for i in range(1, 5): cv2.waitKey(1)
+
 import cv2
 import numpy as np
 import mediapipe as mp
 import joblib
-import language_tool_python
 import os
-import requests  # To talk to your Backend Server
+import requests
+import threading
+import time
+import google.generativeai as genai
 
-# --- MAC M2 / JAVA OPTIMIZATION ---
-os.environ['JAVA_HOME'] = '/opt/homebrew/opt/openjdk'
-os.environ['PATH'] = '/opt/homebrew/opt/openjdk/bin:' + os.environ['PATH']
+genai.configure(api_key="AIzaSyCMDfyE296I0dEL6R_gQ-U6kvuhgfF67XM")
+model_llm = genai.GenerativeModel("gemini-2.5-flash")
+grammar_cache = {}
 
 # --- CONFIG ---
+
 MODEL_PATH = 'asl_model.pkl'
-THRESHOLD = 8   
-CONF_MIN = 0.65 
-BACKEND_URL = "http://localhost:5000/speak" # Adjust port if your Node server uses a different one
+THRESHOLD = 8
+CONF_MIN = 0.5
+BACKEND_URL = "http://localhost:5000/speak"
 
-# --- NLP ENGINE INITIALIZATION ---
-print("Initializing Java Grammar Server...")
-try:
-    tool = language_tool_python.LanguageTool('en-US')
-    print("Grammar Engine: ONLINE")
-except Exception as e:
-    print(f"Grammar Engine failed: {e}. Switching to Simple Mode.")
-    tool = None
+# --- GLOBAL STATE ---
+last_confidence = 0.0
+sentence_fragments = []
+final_sentence = ""
+current_word = ""
+counter = 0
+last_processed_time = 0
+grammar_cache = {}
 
+# ---------------------------------------------------------
+# Send sentence to Node backend (which triggers browser TTS)
+# ---------------------------------------------------------
 def send_to_frontend(text):
-    """Sends the finalized text to the backend to trigger TTS on the web app."""
-    if not text: return
+    if not text:
+        return
     try:
-        # We send a POST request to your Node.js/Express backend
-        response = requests.post(BACKEND_URL, json={"message": text}, timeout=1)
+        response = requests.post(BACKEND_URL, json={"message": text}, timeout=2)
         if response.status_code == 200:
-            print(f"Successfully broadcasted: {text}")
+            print("Broadcasted:", text)
     except Exception as e:
-        print(f"Backend Communication Error: {e}")
+        print("Backend error:", e)
 
-def fix_grammar_locally(fragments):
-    if not fragments: return ""
-    words = [w.lower() for w in fragments]
-    
-    # 1. Subject Correction
-    if words[0] == "me":
-        words[0] = "i"
-    
-    # 2. Verb Injection (State of Being)
-    adjectives = ["happy", "sad", "hungry", "thirsty", "tired", "fine"]
-    if len(words) >= 2 and words[0] == "i" and words[1] in adjectives:
-        words.insert(1, "am")
-        
-    processed_text = " ".join(words)
+# ---------------------------------------------------------
+# LLM Grammar Correction
+# ---------------------------------------------------------
+def fix_grammar_with_llm(fragments):
+    if not fragments:
+        return ""
 
-    # 3. Phrase Mapping
-    replacements = {
-        "i want": "I want",
-        "where you": "where are you",
-        "hello i": "Hello, I am",
-    }
-    for gloss, correct in replacements.items():
-        if gloss in processed_text.lower():
-            processed_text = processed_text.lower().replace(gloss, correct)
+    asl_text = " ".join(fragments)
 
-    # 4. Java Polish
-    if tool:
-        try:
-            processed_text = tool.correct(processed_text)
-        except: pass
-            
-    final = processed_text.strip().capitalize()
-    if any(q in final.lower() for q in ["where", "who", "what", "why", "how"]):
-        if not final.endswith("?"): final = final.rstrip(".") + "?"
-    elif not final.endswith("."):
-        final += "."
-    return final
+    # Cache to avoid repeated API calls
+    if asl_text in grammar_cache:
+        return grammar_cache[asl_text]
 
-# --- MODEL LOADING ---
+    prompt = f"""
+You are an ASL (American Sign Language) interpreter.
+
+ASL gloss uses keywords and often misses helper verbs and tense.
+Convert the following ASL gloss into a natural, grammatically correct English sentence.
+
+Rules:
+- Infer tense
+- Add missing words (am/is/are/was/were/did/to/the)
+- Capitalize properly
+- Add punctuation
+- Return ONLY the final English sentence
+- Do not explain
+
+ASL gloss:
+{asl_text}
+"""
+
+    try:
+        response = model_llm.generate_content(prompt)
+
+        corrected = response.text.strip()
+
+        grammar_cache[asl_text] = corrected
+        return corrected
+
+    except Exception as e:
+        print("Gemini Error:", e)
+        return asl_text
+
+# ---------------------------------------------------------
+# Run LLM + TTS without freezing camera
+# ---------------------------------------------------------
+def process_sentence_async(fragments):
+    global final_sentence
+
+    sentence = fix_grammar_with_llm(fragments)
+    final_sentence = sentence
+    send_to_frontend(sentence)
+
+
+# ---------------------------------------------------------
+# Load ML model
+# ---------------------------------------------------------
 try:
     model = joblib.load(MODEL_PATH)
     print("ASL Model: LOADED")
 except Exception as e:
-    print(f"Error loading model: {e}")
+    print("Model loading failed:", e)
     exit()
 
-# Mediapipe Hands
+# ---------------------------------------------------------
+# MediaPipe setup
+# ---------------------------------------------------------
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(min_detection_confidence=0.7, max_num_hands=2)
 mp_drawing = mp.solutions.drawing_utils
 
 cap = cv2.VideoCapture(0)
-sentence_fragments = []
-final_sentence = "" 
-current_word = ""
-counter = 0
 
 print("\n--- ENGINE RUNNING ---")
 
+# ---------------------------------------------------------
+# MAIN REAL-TIME LOOP
+# ---------------------------------------------------------
 while cap.isOpened():
+
     ret, frame = cap.read()
-    if not ret: break
+    if not ret:
+        break
+
     frame = cv2.flip(frame, 1)
     h, w, _ = frame.shape
-    
+
     results = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    row_data = np.zeros(126) 
-    prediction_made = False
+    row_data = np.zeros(126)
 
     if results.multi_hand_landmarks:
+
+        # Extract features
         for i, hand_lms in enumerate(results.multi_hand_landmarks):
             if i < 2:
                 wrist = hand_lms.landmark[0]
                 coords = []
+
                 for lm in hand_lms.landmark:
-                    coords.extend([lm.x - wrist.x, lm.y - wrist.y, lm.z - wrist.z])
-                row_data[i*63 : (i+1)*63] = coords
+                    coords.extend([
+                        lm.x - wrist.x,
+                        lm.y - wrist.y,
+                        lm.z - wrist.z
+                    ])
+
+                row_data[i*63:(i+1)*63] = coords
                 mp_drawing.draw_landmarks(frame, hand_lms, mp_hands.HAND_CONNECTIONS)
-        
+
+        # Predict
         probs = model.predict_proba([row_data])
         conf = np.max(probs)
         pred = model.predict([row_data])[0]
+        last_confidence = conf
 
         if conf > CONF_MIN:
-            prediction_made = True
+
             if pred == current_word:
                 counter += 1
             else:
                 current_word = pred
                 counter = 0
-            
+
+            # Stable detection
             if counter == THRESHOLD:
-                if pred == "space":
-                    if sentence_fragments:
-                        final_sentence = fix_grammar_locally(sentence_fragments)
-                        # TRIGGER FRONTEND TTS & UI
-                        send_to_frontend(final_sentence)
-                        sentence_fragments = [] 
+
+                # SPACE → finalize sentence
+                if pred == "space" and sentence_fragments:
+
+                    if time.time() - last_processed_time > 2:
+                        last_processed_time = time.time()
+
+                        fragments_copy = sentence_fragments.copy()
+                        sentence_fragments.clear()
+
+                        threading.Thread(
+                            target=process_sentence_async,
+                            args=(fragments_copy,),
+                            daemon=True
+                        ).start()
+
+                # Normal word
                 elif pred != "none":
                     if not sentence_fragments or sentence_fragments[-1] != pred:
                         sentence_fragments.append(pred)
-                        final_sentence = "" 
+                        final_sentence = ""
+
                 counter = 0
+
     else:
         current_word = ""
         counter = 0
 
-    # UI Overlays
+    # ---------------- UI ----------------
     cv2.rectangle(frame, (0, 0), (w, 85), (20, 20, 20), -1)
+
+    conf_percent = int(last_confidence * 100)
+    cv2.putText(frame, f"Confidence: {conf_percent}%",
+                (20, 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                (255, 255, 255), 2)
+
     display_text = final_sentence if final_sentence else " ".join(sentence_fragments).upper()
     color = (0, 255, 0) if final_sentence else (0, 255, 255)
-    cv2.putText(frame, display_text, (20, 55), cv2.FONT_HERSHEY_DUPLEX, 1.0, color, 2)
+
+    cv2.putText(frame, display_text, (20, 55),
+                cv2.FONT_HERSHEY_DUPLEX, 1.0, color, 2)
 
     cv2.imshow('Universal Link - Backend Engine', frame)
-    
+
     key = cv2.waitKey(1)
-    if key == ord('q'): break
-    if key == ord('c'): 
-        sentence_fragments = []
+    if key == ord('q'):
+        break
+    if key == ord('c'):
+        sentence_fragments.clear()
         final_sentence = ""
 
+# Cleanup
 cap.release()
 cv2.destroyAllWindows()
-for i in range(1, 5): cv2.waitKey(1)
+for _ in range(4):
+    cv2.waitKey(1)

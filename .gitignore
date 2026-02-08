@@ -1,7 +1,5 @@
-my_data.csv
+venv/
 __pycache__/
+*.pyc
 .DS_Store
-venv/venv/
-my_data.csv
-__pycache__/
-.DS_Store
+.env
